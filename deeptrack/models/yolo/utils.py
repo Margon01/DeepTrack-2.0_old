@@ -1,3 +1,4 @@
+from .yolo import decode_train
 import cv2
 import random
 import colorsys
@@ -92,13 +93,16 @@ def get_anchors(anchors_path, tiny=False):
 def image_preprocess(image, target_size, gt_boxes=None):
 
     ih, iw = target_size
-    h, w, _ = image.shape
+    h, w, c = image.shape
 
     scale = min(iw / w, ih / h)
     nw, nh = int(scale * w), int(scale * h)
     image_resized = cv2.resize(image, (nw, nh))
 
-    image_paded = np.full(shape=[ih, iw, 3], fill_value=128.0)
+    if image_resized.ndim == 2:
+        image_resized = np.expand_dims(image_resized, axis=-1)
+
+    image_paded = np.full(shape=[ih, iw, c], fill_value=128.0)
     dw, dh = (iw - nw) // 2, (ih - nh) // 2
     image_paded[dh : nh + dh, dw : nw + dw, :] = image_resized
     image_paded = image_paded / 255.0

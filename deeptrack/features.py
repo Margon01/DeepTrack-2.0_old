@@ -208,7 +208,10 @@ class Feature(DeepTrackNode):
 
         # _process_and_get calls the get function correctly according
         # to the __distributed__ attribute
-        new_list = self._process_and_get(image_list, **feature_input)
+
+        new_list = self._process_and_get(
+            image_list, feature_input=feature_input, **feature_input
+        )
 
         for index, image in enumerate(new_list):
 

@@ -1,84 +1,239 @@
 import numpy as np
 import tensorflow as tf
-import .utils as utils
-import .common as common
-import .backbone as backbone
-from .config import cfg
-
-# NUM_CLASS       = len(utils.read_class_names(cfg.YOLO.CLASSES))
-# STRIDES         = np.array(cfg.YOLO.STRIDES)
-# IOU_LOSS_THRESH = cfg.YOLO.IOU_LOSS_THRESH
-# XYSCALE = cfg.YOLO.XYSCALE
-# ANCHORS = utils.get_anchors(cfg.YOLO.ANCHORS)
+from tensorflow import keras
+from . import utils
+from . import commons as common
+from . import backbone
 
 
-def YOLO(input_layer, NUM_CLASS, model="yolov4", is_tiny=False):
-    if is_tiny:
-        if model == "yolov4":
-            return YOLOv4_tiny(input_layer, NUM_CLASS)
-        elif model == "yolov3":
-            return YOLOv3_tiny(input_layer, NUM_CLASS)
-    else:
-        if model == "yolov4":
-            return YOLOv4(input_layer, NUM_CLASS)
-        elif model == "yolov3":
-            return YOLOv3(input_layer, NUM_CLASS)
+class YOLObase(keras.Model):
+    def __init__(
+        self, input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
+    ):
+        super().__init__()
+        self.input_size = input_shape
+        self.num_class = NUM_CLASS
+        self.strides = STRIDES
+        self.anchors = ANCHORS
+        self.xyscale = XYSCALE
+        self.iou_loss_thresh = IOU_LOSS_THRESH
+
+    def compute_loss(self, pred, conv, label, bboxes, i=0):
+        conv_shape = tf.shape(conv)
+        batch_size = conv_shape[0]
+        output_size = conv_shape[1]
+        input_size = self.strides[i] * output_size
+        conv = tf.reshape(
+            conv, (batch_size, output_size, output_size, 3, 5 + self.num_class)
+        )
+
+        conv_raw_conf = conv[:, :, :, :, 4:5]
+        conv_raw_prob = conv[:, :, :, :, 5:]
+
+        pred_xywh = pred[:, :, :, :, 0:4]
+        pred_conf = pred[:, :, :, :, 4:5]
+
+        label_xywh = label[:, :, :, :, 0:4]
+        respond_bbox = label[:, :, :, :, 4:5]
+        label_prob = label[:, :, :, :, 5:]
+
+        giou = tf.expand_dims(utils.bbox_giou(pred_xywh, label_xywh), axis=-1)
+        input_size = tf.cast(input_size, tf.float32)
+
+        bbox_loss_scale = 2.0 - 1.0 * label_xywh[:, :, :, :, 2:3] * label_xywh[
+            :, :, :, :, 3:4
+        ] / (input_size ** 2)
+        giou_loss = respond_bbox * bbox_loss_scale * (1 - giou)
+
+        iou = utils.bbox_iou(
+            pred_xywh[:, :, :, :, np.newaxis, :],
+            bboxes[:, np.newaxis, np.newaxis, np.newaxis, :, :],
+        )
+        max_iou = tf.expand_dims(tf.reduce_max(iou, axis=-1), axis=-1)
+
+        respond_bgd = (1.0 - respond_bbox) * tf.cast(
+            max_iou < self.iou_loss_thresh, tf.float32
+        )
+
+        conf_focal = tf.pow(respond_bbox - pred_conf, 2)
+
+        conf_loss = conf_focal * (
+            respond_bbox
+            * tf.nn.sigmoid_cross_entropy_with_logits(
+                labels=respond_bbox, logits=conv_raw_conf
+            )
+            + respond_bgd
+            * tf.nn.sigmoid_cross_entropy_with_logits(
+                labels=respond_bbox, logits=conv_raw_conf
+            )
+        )
+
+        prob_loss = respond_bbox * tf.nn.sigmoid_cross_entropy_with_logits(
+            labels=label_prob, logits=conv_raw_prob
+        )
+
+        giou_loss = tf.reduce_mean(tf.reduce_sum(giou_loss, axis=[1, 2, 3, 4]))
+        conf_loss = tf.reduce_mean(tf.reduce_sum(conf_loss, axis=[1, 2, 3, 4]))
+        prob_loss = tf.reduce_mean(tf.reduce_sum(prob_loss, axis=[1, 2, 3, 4]))
+
+        return giou_loss, conf_loss, prob_loss
+
+    def train_step(self, data):
+        image_data, target = data
+        with tf.GradientTape() as tape:
+            pred_result = self(image_data, training=True)
+            giou_loss = conf_loss = prob_loss = 0
+
+            # optimizing process
+            for i in range(3):
+
+                conv, pred = pred_result[i * 2], pred_result[i * 2 + 1]
+                loss_items = self.compute_loss(
+                    pred,
+                    conv,
+                    target[i][0],
+                    target[i][1],
+                    i=i,
+                )
+                giou_loss += loss_items[0]
+                conf_loss += loss_items[1]
+                prob_loss += loss_items[2]
+
+            total_loss = giou_loss + conf_loss + prob_loss
+
+            gradients = tape.gradient(total_loss, self.trainable_variables)
+            self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+
+            return {
+                "loss": total_loss,
+                "giou_loss": giou_loss,
+                "conf_loss": conf_loss,
+                "prob_loss": prob_loss,
+            }
+
+    def feature_maps_to_bbox_tensors(self, feature_maps):
+        bbox_tensors = []
+        for i, fm in enumerate(feature_maps):
+            if i == 0:
+                bbox_tensor = decode_train(
+                    fm,
+                    self.input_size // 8,
+                    self.num_class,
+                    self.strides,
+                    self.anchors,
+                    i,
+                    self.xyscale,
+                )
+            elif i == 1:
+                bbox_tensor = decode_train(
+                    fm,
+                    self.input_size // 16,
+                    self.num_class,
+                    self.strides,
+                    self.anchors,
+                    i,
+                    self.xyscale,
+                )
+            else:
+                bbox_tensor = decode_train(
+                    fm,
+                    self.input_size // 32,
+                    self.num_class,
+                    self.strides,
+                    self.anchors,
+                    i,
+                    self.xyscale,
+                )
+            bbox_tensors.append(fm)
+            bbox_tensors.append(bbox_tensor)
+        return bbox_tensors
+
+    def call(self, x):
+        return self.model(x)
 
 
-def YOLOv3(input_layer, NUM_CLASS):
-    route_1, route_2, conv = backbone.darknet53(input_layer)
-
-    conv = common.convolutional(conv, (1, 1, 1024, 512))
-    conv = common.convolutional(conv, (3, 3, 512, 1024))
-    conv = common.convolutional(conv, (1, 1, 1024, 512))
-    conv = common.convolutional(conv, (3, 3, 512, 1024))
-    conv = common.convolutional(conv, (1, 1, 1024, 512))
-
-    conv_lobj_branch = common.convolutional(conv, (3, 3, 512, 1024))
-    conv_lbbox = common.convolutional(
-        conv_lobj_branch, (1, 1, 1024, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
-
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-    conv = common.upsample(conv)
-
-    conv = tf.concat([conv, route_2], axis=-1)
-
-    conv = common.convolutional(conv, (1, 1, 768, 256))
-    conv = common.convolutional(conv, (3, 3, 256, 512))
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-    conv = common.convolutional(conv, (3, 3, 256, 512))
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-
-    conv_mobj_branch = common.convolutional(conv, (3, 3, 256, 512))
-    conv_mbbox = common.convolutional(
-        conv_mobj_branch, (1, 1, 512, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
-
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-    conv = common.upsample(conv)
-
-    conv = tf.concat([conv, route_1], axis=-1)
-
-    conv = common.convolutional(conv, (1, 1, 384, 128))
-    conv = common.convolutional(conv, (3, 3, 128, 256))
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-    conv = common.convolutional(conv, (3, 3, 128, 256))
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-
-    conv_sobj_branch = common.convolutional(conv, (3, 3, 128, 256))
-    conv_sbbox = common.convolutional(
-        conv_sobj_branch, (1, 1, 256, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
-
-    return [conv_sbbox, conv_mbbox, conv_lbbox]
+import tensorflow as tf
 
 
-def YOLOv4(input_layer, NUM_CLASS):
+class YOLOv3(YOLObase):
+    def __init__(
+        self, input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
+    ):
+        super().__init__(
+            input_shape[0], NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
+        )
+
+        input_layer = keras.layers.Input(input_shape)
+
+        route_1, route_2, conv = backbone.darknet53(input_layer)
+
+        conv = common.convolutional(conv, (1, 1, 1024, 512))
+        conv = common.convolutional(conv, (3, 3, 512, 1024))
+        conv = common.convolutional(conv, (1, 1, 1024, 512))
+        conv = common.convolutional(conv, (3, 3, 512, 1024))
+        conv = common.convolutional(conv, (1, 1, 1024, 512))
+
+        conv_lobj_branch = common.convolutional(conv, (3, 3, 512, 1024))
+        conv_lbbox = common.convolutional(
+            conv_lobj_branch,
+            (1, 1, 1024, 3 * (self.num_class + 5)),
+            activate=False,
+            bn=False,
+        )
+
+        conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.upsample(conv)
+
+        conv = tf.concat([conv, route_2], axis=-1)
+
+        conv = common.convolutional(conv, (1, 1, 768, 256))
+        conv = common.convolutional(conv, (3, 3, 256, 512))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.convolutional(conv, (3, 3, 256, 512))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
+
+        conv_mobj_branch = common.convolutional(conv, (3, 3, 256, 512))
+        conv_mbbox = common.convolutional(
+            conv_mobj_branch,
+            (1, 1, 512, 3 * (self.num_class + 5)),
+            activate=False,
+            bn=False,
+        )
+
+        conv = common.convolutional(conv, (1, 1, 256, 128))
+        conv = common.upsample(conv)
+
+        conv = tf.concat([conv, route_1], axis=-1)
+
+        conv = common.convolutional(conv, (1, 1, 384, 128))
+        conv = common.convolutional(conv, (3, 3, 128, 256))
+        conv = common.convolutional(conv, (1, 1, 256, 128))
+        conv = common.convolutional(conv, (3, 3, 128, 256))
+        conv = common.convolutional(conv, (1, 1, 256, 128))
+
+        conv_sobj_branch = common.convolutional(conv, (3, 3, 128, 256))
+        conv_sbbox = common.convolutional(
+            conv_sobj_branch,
+            (1, 1, 256, 3 * (self.num_class + 5)),
+            activate=False,
+            bn=False,
+        )
+
+        bbox_tensors = self.feature_maps_to_bbox_tensors(
+            [conv_sbbox, conv_mbbox, conv_lbbox],
+        )
+
+        self.model = keras.Model(input_layer, bbox_tensors)
+
+
+def YOLOv4(input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE):
+
+    input_layer = keras.layers.Input(input_shape)
     route_1, route_2, conv = backbone.cspdarknet53(input_layer)
 
     route = conv
     conv = common.convolutional(conv, (1, 1, 512, 256))
+
     conv = common.upsample(conv)
     route_2 = common.convolutional(route_2, (1, 1, 512, 256))
     conv = tf.concat([route_2, conv], axis=-1)
@@ -136,51 +291,16 @@ def YOLOv4(input_layer, NUM_CLASS):
         conv, (1, 1, 1024, 3 * (NUM_CLASS + 5)), activate=False, bn=False
     )
 
-    return [conv_sbbox, conv_mbbox, conv_lbbox]
-
-
-def YOLOv4_tiny(input_layer, NUM_CLASS):
-    route_1, conv = backbone.cspdarknet53_tiny(input_layer)
-
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-
-    conv_lobj_branch = common.convolutional(conv, (3, 3, 256, 512))
-    conv_lbbox = common.convolutional(
-        conv_lobj_branch, (1, 1, 512, 3 * (NUM_CLASS + 5)), activate=False, bn=False
+    bbox_tensors = utils.feature_maps_to_bbox_tensors(
+        [conv_sbbox, conv_mbbox, conv_lbbox],
+        input_shape,
+        NUM_CLASS,
+        STRIDES,
+        ANCHORS,
+        XYSCALE,
     )
 
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-    conv = common.upsample(conv)
-    conv = tf.concat([conv, route_1], axis=-1)
-
-    conv_mobj_branch = common.convolutional(conv, (3, 3, 128, 256))
-    conv_mbbox = common.convolutional(
-        conv_mobj_branch, (1, 1, 256, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
-
-    return [conv_mbbox, conv_lbbox]
-
-
-def YOLOv3_tiny(input_layer, NUM_CLASS):
-    route_1, conv = backbone.darknet53_tiny(input_layer)
-
-    conv = common.convolutional(conv, (1, 1, 1024, 256))
-
-    conv_lobj_branch = common.convolutional(conv, (3, 3, 256, 512))
-    conv_lbbox = common.convolutional(
-        conv_lobj_branch, (1, 1, 512, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
-
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-    conv = common.upsample(conv)
-    conv = tf.concat([conv, route_1], axis=-1)
-
-    conv_mobj_branch = common.convolutional(conv, (3, 3, 128, 256))
-    conv_mbbox = common.convolutional(
-        conv_mobj_branch, (1, 1, 256, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
-
-    return [conv_mbbox, conv_lbbox]
+    return keras.Model(input_layer, bbox_tensors)
 
 
 def decode(
@@ -201,9 +321,11 @@ def decode(
 def decode_train(
     conv_output, output_size, NUM_CLASS, STRIDES, ANCHORS, i=0, XYSCALE=[1, 1, 1]
 ):
+
     conv_output = tf.reshape(
         conv_output,
         (tf.shape(conv_output)[0], output_size, output_size, 3, 5 + NUM_CLASS),
+        name=f"reshape{i}",
     )
 
     conv_raw_dxdy, conv_raw_dwdh, conv_raw_conf, conv_raw_prob = tf.split(
@@ -223,6 +345,7 @@ def decode_train(
     ) * STRIDES[i]
     pred_wh = tf.exp(conv_raw_dwdh) * ANCHORS[i]
     pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
+    pred_xywh = pred_xywh
 
     pred_conf = tf.sigmoid(conv_raw_conf)
     pred_prob = tf.sigmoid(conv_raw_prob)
@@ -235,7 +358,9 @@ def decode_tf(
 ):
     batch_size = tf.shape(conv_output)[0]
     conv_output = tf.reshape(
-        conv_output, (batch_size, output_size, output_size, 3, 5 + NUM_CLASS)
+        conv_output,
+        (batch_size, output_size, output_size, 3, 5 + NUM_CLASS),
+        name=f"reshape{i}",
     )
 
     conv_raw_dxdy, conv_raw_dwdh, conv_raw_conf, conv_raw_prob = tf.split(
@@ -300,60 +425,3 @@ def filter_boxes(
     )
     # return tf.concat([boxes, pred_conf], axis=-1)
     return (boxes, pred_conf)
-
-
-def compute_loss(pred, conv, label, bboxes, STRIDES, NUM_CLASS, IOU_LOSS_THRESH, i=0):
-    conv_shape = tf.shape(conv)
-    batch_size = conv_shape[0]
-    output_size = conv_shape[1]
-    input_size = STRIDES[i] * output_size
-    conv = tf.reshape(conv, (batch_size, output_size, output_size, 3, 5 + NUM_CLASS))
-
-    conv_raw_conf = conv[:, :, :, :, 4:5]
-    conv_raw_prob = conv[:, :, :, :, 5:]
-
-    pred_xywh = pred[:, :, :, :, 0:4]
-    pred_conf = pred[:, :, :, :, 4:5]
-
-    label_xywh = label[:, :, :, :, 0:4]
-    respond_bbox = label[:, :, :, :, 4:5]
-    label_prob = label[:, :, :, :, 5:]
-
-    giou = tf.expand_dims(utils.bbox_giou(pred_xywh, label_xywh), axis=-1)
-    input_size = tf.cast(input_size, tf.float32)
-
-    bbox_loss_scale = 2.0 - 1.0 * label_xywh[:, :, :, :, 2:3] * label_xywh[
-        :, :, :, :, 3:4
-    ] / (input_size ** 2)
-    giou_loss = respond_bbox * bbox_loss_scale * (1 - giou)
-
-    iou = utils.bbox_iou(
-        pred_xywh[:, :, :, :, np.newaxis, :],
-        bboxes[:, np.newaxis, np.newaxis, np.newaxis, :, :],
-    )
-    max_iou = tf.expand_dims(tf.reduce_max(iou, axis=-1), axis=-1)
-
-    respond_bgd = (1.0 - respond_bbox) * tf.cast(max_iou < IOU_LOSS_THRESH, tf.float32)
-
-    conf_focal = tf.pow(respond_bbox - pred_conf, 2)
-
-    conf_loss = conf_focal * (
-        respond_bbox
-        * tf.nn.sigmoid_cross_entropy_with_logits(
-            labels=respond_bbox, logits=conv_raw_conf
-        )
-        + respond_bgd
-        * tf.nn.sigmoid_cross_entropy_with_logits(
-            labels=respond_bbox, logits=conv_raw_conf
-        )
-    )
-
-    prob_loss = respond_bbox * tf.nn.sigmoid_cross_entropy_with_logits(
-        labels=label_prob, logits=conv_raw_prob
-    )
-
-    giou_loss = tf.reduce_mean(tf.reduce_sum(giou_loss, axis=[1, 2, 3, 4]))
-    conf_loss = tf.reduce_mean(tf.reduce_sum(conf_loss, axis=[1, 2, 3, 4]))
-    prob_loss = tf.reduce_mean(tf.reduce_sum(prob_loss, axis=[1, 2, 3, 4]))
-
-    return giou_loss, conf_loss, prob_loss

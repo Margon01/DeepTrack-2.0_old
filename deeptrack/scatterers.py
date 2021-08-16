@@ -106,7 +106,14 @@ class Scatterer(Feature):
         return properties
 
     def _process_and_get(
-        self, *args, voxel_size, upsample, upsample_axes=None, crop_empty=True, **kwargs
+        self,
+        *args,
+        voxel_size,
+        upsample,
+        feature_input,
+        upsample_axes=None,
+        crop_empty=True,
+        **kwargs
     ):
         # Post processes the created object to handle upsampling,
         # as well as cropping empty slices.
@@ -169,6 +176,11 @@ class Scatterer(Feature):
             new_image = new_image[~np.all(new_image == 0, axis=(1, 2))]
             new_image = new_image[:, ~np.all(new_image == 0, axis=(0, 2))]
             new_image = new_image[:, :, ~np.all(new_image == 0, axis=(0, 1))]
+
+        if "bbox" not in feature_input:
+            position = feature_input["position"]
+            bbox = [position[1], position[0], new_image.shape[1], new_image.shape[0]]
+            feature_input["bbox"] = bbox
 
         return [Image(new_image)]
 
@@ -413,7 +425,7 @@ class Ellipsoid(Scatterer):
 
         return propertydict
 
-    def get(self, image, radius, rotation, voxel_size, **kwargs):
+    def get(self, _, radius, rotation, **kwargs):
 
         radius_in_pixels = radius
 
