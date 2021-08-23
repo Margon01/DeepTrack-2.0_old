@@ -1,5 +1,6 @@
 #%%
 
+from deeptrack.models.yolo import utils
 import deeptrack as dt
 import skimage.measure as measure
 import numpy as np
@@ -59,7 +60,7 @@ def masks_to_bbox(layer):
     CC = measure.regionprops(label)
     left, top, _, right, bottom, _ = CC[0].bbox
 
-    return [top, left, bottom - top, right - left, int(np.max(layer))]
+    return [top, left, bottom, right, int(np.max(layer)) - 1]
 
 
 bboxes = masks >> masks_to_bbox
@@ -79,7 +80,7 @@ from deeptrack.models.yolo.yolo import YOLOv3
 
 model = YOLOv3(
     (256, 256, 1),
-    3,
+    2,
     [8, 16, 32],
     ANCHORS=[
         10,
@@ -113,7 +114,7 @@ from deeptrack.models.yolo.dataset import YoloDataGenerator
 generator = YoloDataGenerator(
     feature=data,
     input_size=np.array([256]),
-    num_class=3,
+    num_class=2,
     label_function=lambda d: np.array(d[1:]),
     batch_size=16,
     min_data_size=100,
@@ -125,7 +126,18 @@ generator.anchors = model.anchors
 with generator:
     model.fit(generator, epochs=10)
 # %%
-
-A, B = generator[0]
+# %%
+model.trainable = False
+model.compile()
 
 # %%
+A, B = generator[0]
+
+
+# %%
+import tensorflow as tf
+
+y = model(tf.constant(A))
+
+# %%
+y[1].shape
