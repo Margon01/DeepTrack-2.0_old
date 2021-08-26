@@ -4,4 +4,4 @@
 from . import backbone
 from . import commons
 from . import utils
-from . import yolo
+from .yolo import *

@@ -7,12 +7,16 @@ import numpy as np
 
 im_size = 256
 scatterer_a = dt.Ellipse(
-    radius=8 * dt.units.px, position=lambda: np.random.rand(2) * 256, class_index=1
+    radius=7 * dt.units.px,
+    z=-4,
+    position=lambda: np.random.rand(2) * 256,
+    class_index=1,
 )
 scatterer_b = dt.Ellipse(
     radius=(12, 7) * dt.units.px,
     rotation=lambda: np.random.rand() * np.pi * 2,
     position=lambda: np.random.rand(2) * 256,
+    intensity=3,
     class_index=2,
 )
 
@@ -23,7 +27,7 @@ scatterer_b = scatterer_b ^ (lambda: np.random.randint(1, 4))
 sample = scatterer_a & scatterer_b
 
 
-image = optics(sample)
+image = optics(sample) >> dt.NormalizeMinMax(0, 1)
 # image.plot()
 
 #%%
@@ -73,8 +77,8 @@ data = image & bboxes
 
 res, *bboxes_res = data.update()()
 
-# plt.imshow(res)
-# plt.show()
+plt.imshow(res)
+plt.show()
 # %%
 from deeptrack.models.yolo.yolo import YOLOv3
 
@@ -116,7 +120,7 @@ generator = YoloDataGenerator(
     input_size=np.array([256]),
     num_class=2,
     label_function=lambda d: np.array(d[1:]),
-    batch_size=16,
+    batch_size=4,
     min_data_size=100,
     max_data_size=200,
 )
@@ -124,20 +128,46 @@ generator = YoloDataGenerator(
 generator.anchors = model.anchors
 #%%
 with generator:
-    model.fit(generator, epochs=10)
+    model.fit(generator, epochs=50)
 # %%
 # %%
 model.trainable = False
 model.compile()
 
 # %%
-A, B = generator[0]
+A, B = generator[1]
 
 
 # %%
 import tensorflow as tf
 
-y = model(tf.constant(A))
+model.score_threshold = 0.4
+X = A[3:4]
+y = model(X)
+y
 
 # %%
-y[1].shape
+boxes = y[:, :, 0:4]
+pred_conf = y[:, :, 4:]
+
+boxes, scores, classes, valid_detections = tf.image.combined_non_max_suppression(
+    boxes=tf.reshape(boxes, (tf.shape(boxes)[0], -1, 1, 4)),
+    scores=tf.reshape(pred_conf, (tf.shape(pred_conf)[0], -1, tf.shape(pred_conf)[-1])),
+    max_output_size_per_class=50,
+    max_total_size=50,
+    iou_threshold=0.11,
+    score_threshold=0.14,
+)
+# %%
+pred_bbox = [boxes.numpy(), scores.numpy(), classes.numpy(), valid_detections.numpy()]
+
+x = np.repeat(X[0] * 256, 3, axis=-1)
+x = dt.models.yolo.utils.draw_bbox(x, pred_bbox, classes=["1", "2"])
+plt.imshow(x)
+# %%
+
+plt.imshow(A[1])
+# %%
+x = np.repeat(A[1], 3, axis=-1)
+plt.imshow(x)
+# %%

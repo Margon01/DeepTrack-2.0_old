@@ -227,7 +227,6 @@ class YoloDataGenerator(ContinuousGenerator):
             uniform_distribution = np.full(self.num_classes, 1.0 / self.num_classes)
             deta = 0.01
             smooth_onehot = onehot * (1 - deta) + deta * uniform_distribution
-
             bbox_xywh = np.concatenate(
                 [
                     (bbox_coor[2:] + bbox_coor[:2]) * 0.5,

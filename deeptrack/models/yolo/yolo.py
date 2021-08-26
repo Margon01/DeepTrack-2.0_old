@@ -17,6 +17,7 @@ class YOLObase(keras.Model):
         self.anchors = ANCHORS
         self.xyscale = XYSCALE
         self.iou_loss_thresh = IOU_LOSS_THRESH
+        self.score_threshold = 0.4
 
     def compute_loss(self, pred, conv, label, bboxes, i=0):
         conv_shape = tf.shape(conv)
@@ -111,11 +112,14 @@ class YOLObase(keras.Model):
                 "prob_loss": prob_loss,
             }
 
-    def feature_maps_to_bbox_tensors(self, feature_maps):
+    def feature_maps_to_bbox_tensors(self, feature_maps, training=False):
+
+        decode = decode_train if training else decode_detect
+
         bbox_tensors = []
         for i, fm in enumerate(feature_maps):
             if i == 0:
-                bbox_tensor = decode_train(
+                bbox_tensor = decode(
                     fm,
                     self.input_size // 8,
                     self.num_class,
@@ -125,7 +129,7 @@ class YOLObase(keras.Model):
                     self.xyscale,
                 )
             elif i == 1:
-                bbox_tensor = decode_train(
+                bbox_tensor = decode(
                     fm,
                     self.input_size // 16,
                     self.num_class,
@@ -135,7 +139,7 @@ class YOLObase(keras.Model):
                     self.xyscale,
                 )
             else:
-                bbox_tensor = decode_train(
+                bbox_tensor = decode(
                     fm,
                     self.input_size // 32,
                     self.num_class,
@@ -144,12 +148,70 @@ class YOLObase(keras.Model):
                     i,
                     self.xyscale,
                 )
-            bbox_tensors.append(fm)
-            bbox_tensors.append(bbox_tensor)
+            if training:
+                bbox_tensors.append(fm)
+                bbox_tensors.append(bbox_tensor)
+            else:
+                bbox_tensors.append(bbox_tensor[0])
+                bbox_tensors.append(bbox_tensor[1])
         return bbox_tensors
 
-    def call(self, x):
-        return self.model(x)
+    def filter_boxes(self, box_xywh, scores, input_shape):
+        score_threshold = self.score_threshold
+        scores_max = tf.math.reduce_max(scores, axis=-1)
+
+        mask = scores_max >= score_threshold
+        class_boxes = tf.boolean_mask(box_xywh, mask)
+        pred_conf = tf.boolean_mask(scores, mask)
+        class_boxes = tf.reshape(
+            class_boxes, [tf.shape(scores)[0], -1, tf.shape(class_boxes)[-1]]
+        )
+        pred_conf = tf.reshape(
+            pred_conf, [tf.shape(scores)[0], -1, tf.shape(pred_conf)[-1]]
+        )
+
+        box_xy, box_wh = tf.split(class_boxes, (2, 2), axis=-1)
+
+        input_shape = tf.cast(input_shape, dtype=tf.float32)
+
+        box_yx = box_xy[..., ::-1]
+        box_hw = box_wh[..., ::-1]
+
+        box_mins = (box_yx - (box_hw / 2.0)) / input_shape
+        box_maxes = (box_yx + (box_hw / 2.0)) / input_shape
+        boxes = tf.concat(
+            [
+                box_mins[..., 0:1],  # y_min
+                box_mins[..., 1:2],  # x_min
+                box_maxes[..., 0:1],  # y_max
+                box_maxes[..., 1:2],  # x_max
+            ],
+            axis=-1,
+        )
+        # return tf.concat([boxes, pred_conf], axis=-1)
+        return (boxes, pred_conf)
+
+    def call(self, x, training=False):
+        y = self.model(x, training=training)
+        decoded_y = self.feature_maps_to_bbox_tensors(y, training=training)
+        if training:
+            return decoded_y
+
+        if not training:
+            pred_bbox = decoded_y[::2]
+            pred_prob = decoded_y[1::2]
+
+            pred_bbox = tf.concat(pred_bbox, axis=1)
+            pred_prob = tf.concat(pred_prob, axis=1)
+
+            boxes, pred_conf = self.filter_boxes(
+                pred_bbox,
+                pred_prob,
+                input_shape=tf.shape(x)[1:3],
+            )
+
+            return tf.concat([boxes, pred_conf], axis=-1)
+        return y
 
 
 import tensorflow as tf
@@ -219,11 +281,7 @@ class YOLOv3(YOLObase):
             bn=False,
         )
 
-        bbox_tensors = self.feature_maps_to_bbox_tensors(
-            [conv_sbbox, conv_mbbox, conv_lbbox],
-        )
-
-        self.model = keras.Model(input_layer, bbox_tensors)
+        self.model = keras.Model(input_layer, [conv_sbbox, conv_mbbox, conv_lbbox])
 
 
 def YOLOv4(input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE):
@@ -291,31 +349,7 @@ def YOLOv4(input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE):
         conv, (1, 1, 1024, 3 * (NUM_CLASS + 5)), activate=False, bn=False
     )
 
-    bbox_tensors = utils.feature_maps_to_bbox_tensors(
-        [conv_sbbox, conv_mbbox, conv_lbbox],
-        input_shape,
-        NUM_CLASS,
-        STRIDES,
-        ANCHORS,
-        XYSCALE,
-    )
-
-    return keras.Model(input_layer, bbox_tensors)
-
-
-def decode(
-    conv_output,
-    output_size,
-    NUM_CLASS,
-    STRIDES,
-    ANCHORS,
-    i,
-    XYSCALE=[1, 1, 1],
-):
-
-    return decode_tf(
-        conv_output, output_size, NUM_CLASS, STRIDES, ANCHORS, i=i, XYSCALE=XYSCALE
-    )
+    return keras.Model(input_layer, (conv_sbbox, conv_mbbox, conv_lbbox))
 
 
 def decode_train(
@@ -353,7 +387,7 @@ def decode_train(
     return tf.concat([pred_xywh, pred_conf, pred_prob], axis=-1)
 
 
-def decode_tf(
+def decode_detect(
     conv_output, output_size, NUM_CLASS, STRIDES, ANCHORS, i=0, XYSCALE=[1, 1, 1]
 ):
     batch_size = tf.shape(conv_output)[0]
@@ -387,41 +421,3 @@ def decode_tf(
     pred_xywh = tf.reshape(pred_xywh, (batch_size, -1, 4))
 
     return pred_xywh, pred_prob
-    # return tf.concat([pred_xywh, pred_conf, pred_prob], axis=-1)
-
-
-def filter_boxes(
-    box_xywh, scores, score_threshold=0.4, input_shape=tf.constant([416, 416])
-):
-    scores_max = tf.math.reduce_max(scores, axis=-1)
-
-    mask = scores_max >= score_threshold
-    class_boxes = tf.boolean_mask(box_xywh, mask)
-    pred_conf = tf.boolean_mask(scores, mask)
-    class_boxes = tf.reshape(
-        class_boxes, [tf.shape(scores)[0], -1, tf.shape(class_boxes)[-1]]
-    )
-    pred_conf = tf.reshape(
-        pred_conf, [tf.shape(scores)[0], -1, tf.shape(pred_conf)[-1]]
-    )
-
-    box_xy, box_wh = tf.split(class_boxes, (2, 2), axis=-1)
-
-    input_shape = tf.cast(input_shape, dtype=tf.float32)
-
-    box_yx = box_xy[..., ::-1]
-    box_hw = box_wh[..., ::-1]
-
-    box_mins = (box_yx - (box_hw / 2.0)) / input_shape
-    box_maxes = (box_yx + (box_hw / 2.0)) / input_shape
-    boxes = tf.concat(
-        [
-            box_mins[..., 0:1],  # y_min
-            box_mins[..., 1:2],  # x_min
-            box_maxes[..., 0:1],  # y_max
-            box_maxes[..., 1:2],  # x_max
-        ],
-        axis=-1,
-    )
-    # return tf.concat([boxes, pred_conf], axis=-1)
-    return (boxes, pred_conf)
