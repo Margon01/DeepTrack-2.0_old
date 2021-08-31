@@ -8,8 +8,23 @@ from . import backbone
 
 class YOLObase(keras.Model):
     def __init__(
-        self, input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
+        self, input_size, NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
     ):
+        """Base abstract implementation of yolo.
+
+        Parameters
+        ----------
+        input_size: int
+           Size of the images
+        NUM_CLASS: int
+           Number of distinct classes in training set
+        STRIDES: list of int
+           List of network strides
+        ANCHORS: list of int
+           List of anchor sizes
+        XYSCALE: list of int
+           List of rescale factors
+        """
         super().__init__()
         self.input_size = input_shape
         self.num_class = NUM_CLASS
@@ -219,8 +234,31 @@ import tensorflow as tf
 
 class YOLOv3(YOLObase):
     def __init__(
-        self, input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
-    ):
+        self, input_shape, NUM_CLASS,
+        STRIDES=[8, 16, 32],
+        ANCHORS=[
+            10,
+            13,
+            16,
+            30,
+            33,
+            23,
+            30,
+            61,
+            62,
+            45,
+            59,
+            119,
+            116,
+            90,
+            156,
+            198,
+            373,
+            326,
+        ],
+        XYSCALE=[1.2, 1.1, 1.05],
+        IOU_LOSS_THRESH=0.5,
+        ):
         super().__init__(
             input_shape[0], NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
         )
@@ -284,72 +322,100 @@ class YOLOv3(YOLObase):
         self.model = keras.Model(input_layer, [conv_sbbox, conv_mbbox, conv_lbbox])
 
 
-def YOLOv4(input_shape, NUM_CLASS, STRIDES, ANCHORS, XYSCALE):
+class YOLOv4(YOLObase):
+    def __init__(self, input_shape, NUM_CLASS,
+        STRIDES=[8, 16, 32],
+        ANCHORS=[
+            10,
+            13,
+            16,
+            30,
+            33,
+            23,
+            30,
+            61,
+            62,
+            45,
+            59,
+            119,
+            116,
+            90,
+            156,
+            198,
+            373,
+            326,
+        ],
+        XYSCALE=[1.2, 1.1, 1.05],
+        IOU_LOSS_THRESH=0.5,
+        ):
+        super().__init__(
+            input_shape[0], NUM_CLASS, STRIDES, ANCHORS, XYSCALE, IOU_LOSS_THRESH
+        )
 
-    input_layer = keras.layers.Input(input_shape)
-    route_1, route_2, conv = backbone.cspdarknet53(input_layer)
+        input_layer = keras.layers.Input(input_shape)
+        route_1, route_2, conv = backbone.cspdarknet53(input_layer)
 
-    route = conv
-    conv = common.convolutional(conv, (1, 1, 512, 256))
+        route = conv
+        conv = common.convolutional(conv, (1, 1, 512, 256))
 
-    conv = common.upsample(conv)
-    route_2 = common.convolutional(route_2, (1, 1, 512, 256))
-    conv = tf.concat([route_2, conv], axis=-1)
+        conv = common.upsample(conv)
+        route_2 = common.convolutional(route_2, (1, 1, 512, 256))
+        conv = tf.concat([route_2, conv], axis=-1)
 
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-    conv = common.convolutional(conv, (3, 3, 256, 512))
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-    conv = common.convolutional(conv, (3, 3, 256, 512))
-    conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.convolutional(conv, (3, 3, 256, 512))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.convolutional(conv, (3, 3, 256, 512))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
 
-    route_2 = conv
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-    conv = common.upsample(conv)
-    route_1 = common.convolutional(route_1, (1, 1, 256, 128))
-    conv = tf.concat([route_1, conv], axis=-1)
+        route_2 = conv
+        conv = common.convolutional(conv, (1, 1, 256, 128))
+        conv = common.upsample(conv)
+        route_1 = common.convolutional(route_1, (1, 1, 256, 128))
+        conv = tf.concat([route_1, conv], axis=-1)
 
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-    conv = common.convolutional(conv, (3, 3, 128, 256))
-    conv = common.convolutional(conv, (1, 1, 256, 128))
-    conv = common.convolutional(conv, (3, 3, 128, 256))
-    conv = common.convolutional(conv, (1, 1, 256, 128))
+        conv = common.convolutional(conv, (1, 1, 256, 128))
+        conv = common.convolutional(conv, (3, 3, 128, 256))
+        conv = common.convolutional(conv, (1, 1, 256, 128))
+        conv = common.convolutional(conv, (3, 3, 128, 256))
+        conv = common.convolutional(conv, (1, 1, 256, 128))
 
-    route_1 = conv
-    conv = common.convolutional(conv, (3, 3, 128, 256))
-    conv_sbbox = common.convolutional(
-        conv, (1, 1, 256, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
+        route_1 = conv
+        conv = common.convolutional(conv, (3, 3, 128, 256))
+        conv_sbbox = common.convolutional(
+            conv, (1, 1, 256, 3 * (NUM_CLASS + 5)), activate=False, bn=False
+        )
 
-    conv = common.convolutional(route_1, (3, 3, 128, 256), downsample=True)
-    conv = tf.concat([conv, route_2], axis=-1)
+        conv = common.convolutional(route_1, (3, 3, 128, 256), downsample=True)
+        conv = tf.concat([conv, route_2], axis=-1)
 
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-    conv = common.convolutional(conv, (3, 3, 256, 512))
-    conv = common.convolutional(conv, (1, 1, 512, 256))
-    conv = common.convolutional(conv, (3, 3, 256, 512))
-    conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.convolutional(conv, (3, 3, 256, 512))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
+        conv = common.convolutional(conv, (3, 3, 256, 512))
+        conv = common.convolutional(conv, (1, 1, 512, 256))
 
-    route_2 = conv
-    conv = common.convolutional(conv, (3, 3, 256, 512))
-    conv_mbbox = common.convolutional(
-        conv, (1, 1, 512, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
+        route_2 = conv
+        conv = common.convolutional(conv, (3, 3, 256, 512))
+        conv_mbbox = common.convolutional(
+            conv, (1, 1, 512, 3 * (NUM_CLASS + 5)), activate=False, bn=False
+        )
 
-    conv = common.convolutional(route_2, (3, 3, 256, 512), downsample=True)
-    conv = tf.concat([conv, route], axis=-1)
+        conv = common.convolutional(route_2, (3, 3, 256, 512), downsample=True)
+        conv = tf.concat([conv, route], axis=-1)
 
-    conv = common.convolutional(conv, (1, 1, 1024, 512))
-    conv = common.convolutional(conv, (3, 3, 512, 1024))
-    conv = common.convolutional(conv, (1, 1, 1024, 512))
-    conv = common.convolutional(conv, (3, 3, 512, 1024))
-    conv = common.convolutional(conv, (1, 1, 1024, 512))
+        conv = common.convolutional(conv, (1, 1, 1024, 512))
+        conv = common.convolutional(conv, (3, 3, 512, 1024))
+        conv = common.convolutional(conv, (1, 1, 1024, 512))
+        conv = common.convolutional(conv, (3, 3, 512, 1024))
+        conv = common.convolutional(conv, (1, 1, 1024, 512))
 
-    conv = common.convolutional(conv, (3, 3, 512, 1024))
-    conv_lbbox = common.convolutional(
-        conv, (1, 1, 1024, 3 * (NUM_CLASS + 5)), activate=False, bn=False
-    )
+        conv = common.convolutional(conv, (3, 3, 512, 1024))
+        conv_lbbox = common.convolutional(
+            conv, (1, 1, 1024, 3 * (NUM_CLASS + 5)), activate=False, bn=False
+        )
 
-    return keras.Model(input_layer, (conv_sbbox, conv_mbbox, conv_lbbox))
+        return keras.Model(input_layer, (conv_sbbox, conv_mbbox, conv_lbbox))
 
 
 def decode_train(

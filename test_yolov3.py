@@ -80,34 +80,10 @@ res, *bboxes_res = data.update()()
 plt.imshow(res)
 plt.show()
 # %%
-from deeptrack.models.yolo.yolo import YOLOv3
+from deeptrack.models.yolo.yolo import YOLOv4
 
-model = YOLOv3(
-    (256, 256, 1),
-    2,
-    [8, 16, 32],
-    ANCHORS=[
-        10,
-        13,
-        16,
-        30,
-        33,
-        23,
-        30,
-        61,
-        62,
-        45,
-        59,
-        119,
-        116,
-        90,
-        156,
-        198,
-        373,
-        326,
-    ],
-    XYSCALE=[1.2, 1.1, 1.05],
-    IOU_LOSS_THRESH=0.5,
+model = YOLOv4(
+    (256, 256, 1),2,
 )
 #%%
 model.compile(optimizer="adam")
