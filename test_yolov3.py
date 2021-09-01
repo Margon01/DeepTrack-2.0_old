@@ -80,10 +80,11 @@ res, *bboxes_res = data.update()()
 plt.imshow(res)
 plt.show()
 # %%
-from deeptrack.models.yolo.yolo import YOLOv4
+from deeptrack.models.yolo.yolo import YOLOv3
 
-model = YOLOv4(
-    (256, 256, 1),2,
+model = YOLOv3(
+    (256, 256, 1),
+    2,
 )
 #%%
 model.compile(optimizer="adam")
@@ -140,10 +141,13 @@ pred_bbox = [boxes.numpy(), scores.numpy(), classes.numpy(), valid_detections.nu
 x = np.repeat(X[0] * 256, 3, axis=-1)
 x = dt.models.yolo.utils.draw_bbox(x, pred_bbox, classes=["1", "2"])
 plt.imshow(x)
+plt.show()
 # %%
 
 plt.imshow(A[1])
+plt.show()
 # %%
 x = np.repeat(A[1], 3, axis=-1)
 plt.imshow(x)
+plt.show()
 # %%
